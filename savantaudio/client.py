@@ -422,7 +422,7 @@ class Switch:
     async def parse(self, value: str):
         if value.startswith('err'):
             return False
-        m = re.search('(ainput|aoutput)-([a-z\-]+)(\d+):(.*)', value)
+        m = re.search(r'(ainput|aoutput)-([a-z\-]+)(\d+):(.*)', value)
         if m:
             if m.group(1) == 'ainput':
                 await self.input(int(m.group(3))).parse(m.group(2), m.group(4))
@@ -431,7 +431,7 @@ class Switch:
             else:
                 raise ValueError(f'got unknown response: {value}')
         else:
-            m = re.search('switch(\d+).(\d+)', value)
+            m = re.search(r'switch(\d+).(\d+)', value)
             if m:
                 output = int(m.group(1))
                 input = int(m.group(2))
