@@ -127,7 +127,7 @@ class Input:
         return self._trim
     
     def __str__(self):
-        return f'Input_{self._number}{{{"Coaxial" if self._coaxial else "TOSLINK"}, trim={self._trim}dB}}'
+        return f'Input_{self._number}{{{{"Coaxial" if self._coaxial else "TOSLINK"}, trim={self._trim}dB}}'
        
     async def updated(self):
         _LOGGER.info(f'Output {self._number} Updated: {self}')
@@ -169,6 +169,17 @@ class Output:
         self._mute = False
         self._delay = [0, 0]
         self._valid = False
+        
+        # PEQ state cache - 7 bands with frequency, level, q
+        # Format: {band_number: {'frequency': int, 'level': int, 'q': float, 'valid': bool}}
+        self._peq_bands = {}
+        for band in range(1, 8):
+            self._peq_bands[band] = {
+                'frequency': 125,
+                'level': 0,
+                'q': 1.414,
+                'valid': False
+            }
     
     @property
     def number(self) -> int:
@@ -197,9 +208,9 @@ class Output:
     @property
     def delay(self) -> tuple:
         return self._delay
-      
+       
     def __str__(self):
-        return f'Output_{self._number}{{{"Stereo" if self._stereo else "Mono"}, {"Passthru" if self._passthru else "Processed"}, volume={self._volume}dB, delay={self._delay[0]}/{self._delay[1]}ms}}'
+        return f'Output_{self._number}{{{{"Stereo" if self._stereo else "Mono"}, {"Passthru" if self._passthru else "Processed"}, volume={self._volume}dB, delay={self._delay[0]}/{self._delay[1]}ms}}'
    
     async def updated(self):
         _LOGGER.info(f'Output {self._number} Updated: {self}')
@@ -230,6 +241,8 @@ class Output:
         await self._switch.send_command(f'aoutput-mono-get{self._number}')
         if self._number < 17 and self._switch._model == Model.SSA_3220D:
             await self._switch.send_command(f'aoutput-delayboth-get{self._number}')
+        # Refresh all PEQ band settings
+        await self.refresh_peq()
     
     async def set_volume(self, vol: int):
         if vol < -38 or vol > 0:
@@ -253,7 +266,217 @@ class Output:
         await self._switch.send_command(f'aoutput-delayleft-set{self._number}:{left}')
         await self._switch.send_command(f'aoutput-delayrighy-set{self._number}:{right}')
         pass
-
+    
+    # ===== PEQ (Parametric Equalizer) Methods =====
+    
+    async def refresh_peq(self):
+        """Refresh all PEQ band settings from the device (all 7 bands)."""
+        _LOGGER.debug(f"Output[{self._number}].refresh_peq")
+        for band in range(1, 8):
+            await self._switch.send_command(f'peqget-output{self._number}-band{band}')
+    
+    async def set_peq_band(self, band: int, frequency: int, level: int, q: float):
+        """
+        Set all PEQ parameters for a specific band (frequency, level, Q).
+        
+        This must be called before sending individual frequency/level/q commands.
+        
+        Args:
+            band: Band number (1-7)
+            frequency: Frequency in Hz (20-20000)
+            level: Level in dB (-12 to +12)
+            q: Q factor (0.4041 to 7.2077)
+        
+        Raises:
+            ValueError: If parameters are out of valid range
+        """
+        if not 1 <= band <= 7:
+            raise ValueError(f'Band must be between 1 and 7, got {band}')
+        if not 20 <= frequency <= 20000:
+            raise ValueError(f'Frequency must be between 20 and 20000 Hz, got {frequency}')
+        if not -12 <= level <= 12:
+            raise ValueError(f'Level must be between -12 and +12 dB, got {level}')
+        if not 0.4041 <= q <= 7.2077:
+            raise ValueError(f'Q must be between 0.4041 and 7.2077, got {q}')
+        
+        command = f'peqset-output{self._number}-band{band}:freq{frequency}-level{level}-q{q}'
+        await self._switch.send_command(command)
+        
+        # Update cache
+        self._peq_bands[band] = {
+            'frequency': frequency,
+            'level': level,
+            'q': q,
+            'valid': True
+        }
+    
+    async def set_peq_frequency(self, band: int, frequency: int):
+        """
+        Set frequency for a specific PEQ band.
+        
+        Note: set_peq_band() must be called first for this band.
+        
+        Args:
+            band: Band number (1-7)
+            frequency: Frequency in Hz (20-20000)
+        
+        Raises:
+            ValueError: If parameters are out of valid range
+        """
+        if not 1 <= band <= 7:
+            raise ValueError(f'Band must be between 1 and 7, got {band}')
+        if not 20 <= frequency <= 20000:
+            raise ValueError(f'Frequency must be between 20 and 20000 Hz, got {frequency}')
+        
+        command = f'peqfreqset-output{self._number}-band{band}:{frequency}'
+        await self._switch.send_command(command)
+        
+        # Update cache
+        self._peq_bands[band]['frequency'] = frequency
+        self._peq_bands[band]['valid'] = True
+    
+    async def set_peq_level(self, band: int, level: int):
+        """
+        Set level (dB) for a specific PEQ band.
+        
+        Note: set_peq_band() must be called first for this band.
+        
+        Args:
+            band: Band number (1-7)
+            level: Level in dB (-12 to +12)
+        
+        Raises:
+            ValueError: If parameters are out of valid range
+        """
+        if not 1 <= band <= 7:
+            raise ValueError(f'Band must be between 1 and 7, got {band}')
+        if not -12 <= level <= 12:
+            raise ValueError(f'Level must be between -12 and +12 dB, got {level}')
+        
+        command = f'peqlevelset-output{self._number}-band{band}:{level}'
+        await self._switch.send_command(command)
+        
+        # Update cache
+        self._peq_bands[band]['level'] = level
+        self._peq_bands[band]['valid'] = True
+    
+    async def set_peq_q(self, band: int, q: float):
+        """
+        Set Q (bandwidth) for a specific PEQ band.
+        
+        Note: set_peq_band() must be called first for this band.
+        
+        Args:
+            band: Band number (1-7)
+            q: Q factor (0.4041 to 7.2077)
+        
+        Raises:
+            ValueError: If parameters are out of valid range
+        """
+        if not 1 <= band <= 7:
+            raise ValueError(f'Band must be between 1 and 7, got {band}')
+        if not 0.4041 <= q <= 7.2077:
+            raise ValueError(f'Q must be between 0.4041 and 7.2077, got {q}')
+        
+        command = f'peqqset-output{self._number}-band{band}:{q}'
+        await self._switch.send_command(command)
+        
+        # Update cache
+        self._peq_bands[band]['q'] = q
+        self._peq_bands[band]['valid'] = True
+    
+    def get_peq_band(self, band: int) -> Optional[Dict]:
+        """
+        Get cached PEQ band configuration.
+        
+        Args:
+            band: Band number (1-7)
+        
+        Returns:
+            Dictionary with 'frequency', 'level', 'q', and 'valid' keys, or None if invalid band
+        """
+        if 1 <= band <= 7:
+            return self._peq_bands[band].copy()
+        return None
+    
+    def get_all_peq_bands(self) -> Dict:
+        """
+        Get all cached PEQ band configurations.
+        
+        Returns:
+            Dictionary mapping band numbers (1-7) to their configurations
+        """
+        return {band: config.copy() for band, config in self._peq_bands.items()}
+    
+    async def parse_peq(self, band: int, value: str) -> bool:
+        """
+        Parse PEQ response from device and update cache.
+        
+        Format: freq125Hz-level5dB-q1.414
+        Example response: peqget-output2-band2:freq125Hz-level-10dB-q1
+        
+        Args:
+            band: Band number extracted from response
+            value: The value string from response
+        
+        Returns:
+            bool: True if parsing was successful
+        """
+        try:
+            if not 1 <= band <= 7:
+                return False
+            
+            # Parse frequency: freq125Hz
+            freq_match = re.search(r'freq(\d+)Hz', value)
+            if not freq_match:
+                return False
+            frequency = int(freq_match.group(1))
+            
+            # Parse level: level-10dB or level5dB
+            level_match = re.search(r'level(-?\d+)dB', value)
+            if not level_match:
+                return False
+            level = int(level_match.group(1))
+            
+            # Parse Q: q1.414 or q1
+            q_match = re.search(r'q([\d.]+)$', value)
+            if not q_match:
+                return False
+            q = float(q_match.group(1))
+            
+            # Validate ranges
+            if not (20 <= frequency <= 20000):
+                _LOGGER.warning(f"PEQ frequency out of range: {frequency}")
+                return False
+            if not (-12 <= level <= 12):
+                _LOGGER.warning(f"PEQ level out of range: {level}")
+                return False
+            if not (0.4041 <= q <= 7.2077):
+                _LOGGER.warning(f"PEQ Q out of range: {q}")
+                return False
+            
+            # Update cache
+            old_config = self._peq_bands[band]
+            self._peq_bands[band] = {
+                'frequency': frequency,
+                'level': level,
+                'q': q,
+                'valid': True
+            }
+            
+            # Log if changed
+            if (old_config['frequency'] != frequency or 
+                old_config['level'] != level or 
+                old_config['q'] != q):
+                _LOGGER.debug(f"Output[{self._number}] Band {band} updated: "
+                             f"freq={frequency}Hz, level={level}dB, q={q}")
+                await self._switch._updated("peq-updated", 
+                                           (self._number, band, self._peq_bands[band].copy()))
+            
+            return True
+        except (ValueError, AttributeError) as ex:
+            _LOGGER.warning(f"Failed to parse PEQ response for band {band}: {ex}")
+            return False
 
 
 class Switch:
@@ -422,6 +645,17 @@ class Switch:
     async def parse(self, value: str):
         if value.startswith('err'):
             return False
+        
+        # Check for PEQ responses: peqget-outputY-bandZ:...
+        m = re.search(r'peqget-output(\d+)-band(\d+):(.*)', value)
+        if m:
+            output_num = int(m.group(1))
+            band_num = int(m.group(2))
+            band_value = m.group(3)
+            await self.output(output_num).parse_peq(band_num, band_value)
+            return True
+        
+        # Standard ainput/aoutput responses
         m = re.search(r'(ainput|aoutput)-([a-z\-]+)(\d+):(.*)', value)
         if m:
             if m.group(1) == 'ainput':
@@ -446,5 +680,3 @@ class Switch:
             else:
                 raise ValueError(f'got unknown response: {value}')
         return True
-
-
